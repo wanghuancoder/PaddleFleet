@@ -1,0 +1,63 @@
+# 每日自动同步上游 PaddlePaddle/PaddleFleet → 本 fork（wanghuancoder/PaddleFleet）的 develop
+#
+# 用法：把本文件放到 fork 仓库的 .github/workflows/sync-upstream.yml 并提交。
+# 前置条件（在 fork 仓库 Settings → Secrets and variables → Actions 里新建 secret）：
+#   SYNC_TOKEN：classic PAT（repo scope），且属于能读 private 上游 PaddlePaddle/PaddleFleet 的账号。
+#     （上游是 private，默认的 GITHUB_TOKEN 读不到它，必须用外部 PAT。
+#       若用 fine-grained token：需授予 上游=Contents:Read，本 fork=Contents:Read/Write。）
+#
+# 为什么北京时间 00:00 跑：APITest 流水线周一/三/五凌晨 01:07(B)/01:23(H) 触发，
+# 同步赶在流水线之前完成，保证当天测的是最新的 fork develop。
+#
+# 防呆：同步前校验上游根目录含 packages/paddlefleet_ops + version.txt，
+# 防止重蹈 troubleshooting D 的坑（workflow 配错把 develop 同步成 Paddle 本体）。
+
+name: Sync upstream PaddleFleet into fork develop
+
+on:
+  schedule:
+    - cron: '0 16 * * *'   # 每天 16:00 UTC = 北京时间次日 00:00
+  workflow_dispatch: {}    # 支持在 Actions 页手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          token: ${{ secrets.SYNC_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream develop
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          git remote add upstream "https://x-access-token:${SYNC_TOKEN}@github.com/PaddlePaddle/PaddleFleet.git"
+          git fetch --depth 1 upstream develop
+
+      - name: Sanity check (upstream must be PaddleFleet)
+        run: |
+          test -n "$(git ls-tree --name-only upstream/develop | grep -x packages/paddlefleet_ops)" \
+            && test -n "$(git ls-tree --name-only upstream/develop | grep -x version.txt)"
+          echo "[sync] 根目录校验通过：packages/paddlefleet_ops + version.txt 均在，确认是 PaddleFleet"
+
+      - name: Merge upstream develop into fork develop
+        run: |
+          # 保留 fork 本地 commit（如有）；fork 无本地改动时等价 fast-forward
+          # 若想要纯镜像（丢弃 fork 本地改动），改用：
+          #   git reset --hard upstream/develop
+          git merge upstream/develop -m "chore: sync upstream PaddleFleet develop $(date -u +%Y-%m-%d)"
+
+      - name: Push to fork
+        run: |
+          git push origin develop
